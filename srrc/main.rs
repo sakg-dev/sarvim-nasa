@@ -83,6 +83,14 @@ pub mod data_explorer {
     pub fn extract_metadata(file:PathBuf) -> Result<Metadata, Box<dyn Error>> {
         let file = hdf5::File::open(file)?;
 
+        let g = file.group("science/LSAR/identification")?;
+        let productType = file.group("science/LSAR/identification")?.dataset("productType")?; // must be GCOV
+        let frequencies = file.group("science/LSAR/identification")?.dataset("listOfFrequencies")?;
+        println!("{:?}", d.read_raw::<hdf5::types::FixedAscii<256>>());
+        // println!("{:?}", find_hdf5_type(d.dtype()?));
+        // println!("{:?}", d.read_scalar::<hdf5::types::FixedAscii<256>>()?);
+        println!("{:?}", g.member_names()?);
+
         let frequencies_group = file.group("science/LSAR/GCOV/grids")?;
         let frequencies= frequencies_group.member_names()?;
         let mut polarizations_hashmap = HashMap::new();
@@ -90,6 +98,8 @@ pub mod data_explorer {
             let polarizations = frequencies_group.group(frequency)?.member_names()?.into_iter().filter(|ds|ds.len() == 4 && ds!="mask").collect::<Vec<_>>();
             polarizations_hashmap.insert(frequency.to_string(), polarizations);
         }
+
+//        let productType = 
 
         let metadata = Metadata {
             frequencies: frequencies,
