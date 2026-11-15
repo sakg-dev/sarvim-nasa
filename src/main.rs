@@ -9,8 +9,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let secondary_file = file_dir.join("NISAR_L2_PR_GCOV_007_165_D_082_2005_DHDH_A_20251215T154911_20251215T154945_P05023_N_F_J_001.h5");
 
     let metadata = data_explorer::extract_metadata(main_file)?;
-    println!("{:?}", metadata);
-    // data_explorer::find_similar_metadatas(main_file, secondary_file)?;
 
     Ok(())
 }
@@ -92,26 +90,28 @@ pub mod data_explorer {
         bounding_polygon: String,
         radar_band: String,
         frequencies: Vec<String>,
-        polarizations: HashMap<String, Vec<String>>,
+        covariance_terms: HashMap<String, Vec<String>>,
     }
 
     #[derive(Debug)]
     pub struct CovarianceMetadata {
-        pub width: usize,
-        pub height: usize,
-        pub data_type: String,
-        pub fill_value: Option<f64>,// no data val
+        width: usize,
+        height: usize,
+        data_type: String,
+        fill_value: f64,// no data val
     }
 
     #[derive(Debug)]
     pub struct RasterMetadata {
-//        pub epsg: Option<i32>,
-//        pub x_coordinates: Vec<f64>,
-//        pub y_coordinates: Vec<f64>,
-//        pub pixel_spacing_x: Option<f64>,
-//        pub pixel_spacing_y: Option<f64>,
-//        pub covariance: HashMap<String, CovarianceMetadata>,
+        epsg: f32,
+        pixel_spacing_x: f64,
+        pixel_spacing_y: f64,
+        covariance: HashMap<String, CovarianceMetadata>,
+        x_coordinates: Vec<f64>,
+        y_coordinates: Vec<f64>,
     }
+    // NOTE: generally 2 products having same polarization names have same coveriance term names
+    // hence using coveriance rn for ease
 
     pub fn extract_metadata(file:PathBuf) -> Result<GcovMetadata, Box<dyn Error>> {
         let file = hdf5::File::open(file)?;
@@ -121,10 +121,11 @@ pub mod data_explorer {
         let grids = &file.group("science/LSAR/GCOV/grids")?;
         for freq in &acquisition_metadata.frequencies {
             let freq_group = &grids.group(freq)?;
-            let raster_metadata = extract_raster_metadata(freq_group)?;
+            let covariance_terms = acquisition_metadata.covariance_terms.get(freq).unwrap();
+            let raster_metadata = extract_raster_metadata(freq_group, covariance_terms)?;
             rasters_metadata.insert(freq.to_string(), raster_metadata);
         }
-        // println!("{:?}", acquisition_metadata);
+        println!("{:?}", rasters_metadata);
         let gcov_metadata = GcovMetadata {
             acquisition: acquisition_metadata,
             rasters: rasters_metadata
@@ -132,8 +133,42 @@ pub mod data_explorer {
         Ok(gcov_metadata)
     }
 
-    pub fn extract_raster_metadata(freq_group: &hdf5::Group) -> Result<RasterMetadata, Box<dyn Error>> {
-        let raster_metadata = RasterMetadata{};
+    pub fn extract_raster_metadata(freq_group: &hdf5::Group, covariance_terms: &Vec<String>) -> Result<RasterMetadata, Box<dyn Error>> {
+        // println!("{:?}", freq_group.member_names()?);
+        // structure(example not true):
+        // { "frequencyA": RasterMetadata { epsg: 32637.0, pixel_spacing_x: 20.0, pixel_spacing_y: -20.0, covariance: {"HHHH": CovarianceMetadata { width: 17064, height: 16704, data_type: "Float", fill_value: NaN }, "HVHV": CovarianceMetadata { width: 17064, height: 16704, data_type: "Float", fill_value: NaN }}, x_coordinates: [...], y_coordinated: [...] }, "frequencyB": RasterMetadata { epsg: 32637.0, pixel_spacing_x: 20.0, pixel_spacing_y: -20.0, covariance: {"HHHH": CovarianceMetadata { width: 17064, height: 16704, data_type: "Float", fill_value: NaN }, "HVHV": CovarianceMetadata { width: 17064, height: 16704, data_type: "Float", fill_value: NaN }}, x_coordinates: [...], y_coordinates: [...]} }
+
+        let epsg = freq_group.dataset("projection")?.attr("epsg_code")?.read_scalar::<f32>()?;
+        let x_coords = freq_group.dataset("xCoordinates")?.read_raw::<f64>()?;
+        let y_coords = freq_group.dataset("yCoordinates")?.read_raw::<f64>()?;
+        let pixel_spacing_x = freq_group.dataset("xCoordinateSpacing")?.read_scalar::<f64>()?;
+        let pixel_spacing_y = freq_group.dataset("yCoordinateSpacing")?.read_scalar::<f64>()?;
+
+        let mut covariance = HashMap::new();
+        for c in covariance_terms {
+            let ds = freq_group.dataset(c)?;
+            let shape = ds.shape();
+            let height = shape[0];
+            let width = shape[1];
+            let data_type= find_hdf5_type(ds.dtype()?);
+            let fill_value = ds.attr("_FillValue")?.read_scalar::<f64>()?;
+            let metadata = CovarianceMetadata {
+                width: width,
+                height: height,
+                data_type: data_type,
+                fill_value: fill_value
+            };
+            covariance.insert(c.to_string(), metadata);
+        }
+        
+        let raster_metadata = RasterMetadata{
+            epsg: epsg,
+            x_coordinates: x_coords,
+            y_coordinates: y_coords,
+            pixel_spacing_x: pixel_spacing_x,
+            pixel_spacing_y: pixel_spacing_y,
+            covariance: covariance
+        };
         Ok(raster_metadata)
     }
 
@@ -150,11 +185,11 @@ pub mod data_explorer {
 
         let frequencies_group = file.group("science/LSAR/GCOV/grids")?;
         let frequencies= frequencies_group.member_names()?;
-        let mut polarizations_hashmap = HashMap::new();
-        let real_valued_polarizes = vec!("HHHH", "HVHV", "VVVV", "VHVH");
+        let mut covariance_terms_hashmap = HashMap::new();
+        let real_valued_covariance_terms = vec!("HHHH", "HVHV", "VVVV", "VHVH");
         for frequency in &frequencies {
-            let polarizations = frequencies_group.group(frequency)?.member_names()?.into_iter().filter(|ds| real_valued_polarizes.contains(&ds.as_str())).collect::<Vec<_>>();
-            polarizations_hashmap.insert(frequency.to_string(), polarizations);
+            let covariance_terms = frequencies_group.group(frequency)?.member_names()?.into_iter().filter(|ds| real_valued_covariance_terms.contains(&ds.as_str())).collect::<Vec<_>>();
+            covariance_terms_hashmap.insert(frequency.to_string(), covariance_terms);
         }
 
         let metadata = AcquisitionMetadata {
@@ -163,7 +198,7 @@ pub mod data_explorer {
             start_time: start_time,
             end_time: end_time,
             frequencies: frequencies,
-            polarizations: polarizations_hashmap,
+            covariance_terms: covariance_terms_hashmap,
             bounding_polygon: bounding_polygon,
             instrument_name: instrument_name,
             radar_band: radar_band
